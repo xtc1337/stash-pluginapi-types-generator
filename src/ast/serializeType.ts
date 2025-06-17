@@ -10,6 +10,7 @@ import {
   FunctionType,
   ImportRefObjectType,
   ImportRefType,
+  MappedType,
   ObjectType,
   PrimitiveType,
   SerializedType,
@@ -21,7 +22,7 @@ const IMPORT_PREFIX_MAP: Record<string, string> = {
   gql: 'PluginApi.GQL',
   'react-bootstrap': 'PluginApi.libraries.Bootstrap',
 };
-const MAX_DEPTH = 4;
+const MAX_DEPTH = 10;
 
 // --- Utility Functions ---
 function isPrimitiveType(type: Type): boolean {
@@ -64,15 +65,15 @@ function isStandardLibType(type: Type): boolean {
 }
 
 function getImportPathForSymbol(symbol: Symbol): string | undefined {
-  const decl = symbol.getDeclarations()?.[0];
-  if (!decl) return undefined;
-
-  const importDecl = decl.getFirstAncestorByKind(
-    ts.SyntaxKind.ImportDeclaration,
-  );
-  if (!importDecl) return undefined;
-
-  return importDecl.getModuleSpecifierValue();
+  for (const decl of symbol.getDeclarations()) {
+    if (Node.isImportSpecifier(decl)) {
+      const importDecl = decl.getFirstAncestorByKind(
+        ts.SyntaxKind.ImportDeclaration,
+      );
+      if (importDecl) return importDecl?.getModuleSpecifierValue();
+    }
+  }
+  return undefined;
 }
 function getImportRefFromUnionType(
   unionType: Type,
@@ -121,7 +122,8 @@ function cleanImportName(name: string): string {
   return match ? match[1] : name;
 }
 function getBaseName(type: Type): string {
-  const raw = type.getText().split('<')[0].trim();
+  const typeName = type.getText();
+  const raw = typeName.split('<')[0].trim();
   const clean = cleanImportName(raw);
 
   const symbol = type.getSymbol();
@@ -275,9 +277,7 @@ function serializeObjectType(
     const propType = decl
       ? prop.getTypeAtLocation(decl)
       : prop.getDeclaredType();
-    if (prop.getName() === 'extraCriteria') {
-      console.log('found');
-    }
+
     props[prop.getName()] = serializeType(
       propType,
       sourceFile,
@@ -285,13 +285,25 @@ function serializeObjectType(
       depth + 1,
     );
   }
-  return { kind: 'object', name: baseName, props };
+  return {
+    kind: 'object',
+    name: baseName,
+    props,
+    importPath: getImportPathFromType(type),
+  };
 }
 
 function getIntersectionName(rootType: Type, types: SerializedType[]): string {
   const rootBase = getBaseName(rootType);
   const joinedInner = types.map((t) => cleanImportName(t.name)).join(' & ');
   return `${rootBase}<${joinedInner}>`;
+}
+
+function getImportPathFromType(type: Type): string | undefined {
+  const importPathSymbol = type.getSymbol();
+  return importPathSymbol
+    ? getImportPathForSymbol(importPathSymbol)
+    : undefined;
 }
 
 function serializeImportRefObject(
@@ -330,16 +342,14 @@ function serializeImportRefObject(
       name: getIntersectionName(type, innerTypes),
       types: innerTypes,
       props: mergedProps,
-      importPath: type.getSymbol()
-        ? getImportPathForSymbol(type.getSymbol())
-        : undefined,
+      importPath: getImportPathFromType(type),
     };
   }
 
   return {
     kind: 'importRef',
     name: getBaseName(type),
-    importPath: getImportPathForSymbol(type.getSymbol()!),
+    importPath: getImportPathFromType(type),
   };
 }
 
@@ -378,29 +388,29 @@ function serializeClassType(
   seen: WeakSet<Type> = new WeakSet(),
   depth: number = 0,
 ): ObjectType {
-  const baseName = getBaseName(type);
-  const props: Record<string, SerializedType> = {};
-
-  for (const prop of type.getProperties()) {
-    const decl = prop.getDeclarations()?.[0];
-    const propType = decl
-      ? prop.getTypeAtLocation(decl)
-      : prop.getDeclaredType();
-    props[prop.getName()] = serializeType(
-      propType,
-      sourceFile,
-      seen,
-      depth + 1,
-    );
-  }
-
-  return {
-    kind: 'object',
-    name: baseName,
-    props,
-  };
+  return serializeObjectType(type, sourceFile, seen, depth);
 }
 
+function serializeMappedType(
+  type: Type,
+  aliasName: string,
+  sourceFile: SourceFile,
+  seen = new WeakSet<Type>(),
+  depth = 0,
+): MappedType {
+  const typeArguments = type.getAliasTypeArguments?.() || [];
+
+  const [T, K] = typeArguments;
+
+  return {
+    kind: 'mapped',
+    name: aliasName,
+    typeArguments: {
+      ...(T && { T: serializeType(T, sourceFile, seen, depth + 1) }),
+      ...(K && { K: serializeType(K, sourceFile, seen, depth + 1) }),
+    },
+  };
+}
 // --- Main Serializer ---
 export function serializeType(
   type: Type,
@@ -414,6 +424,25 @@ export function serializeType(
   const rawName = type.getText();
   const baseName = getBaseName(type);
 
+  const aliasSymbol = type.getAliasSymbol();
+  const aliasName = aliasSymbol?.getName();
+
+  const isMappedUtility = (name: string | undefined): name is string =>
+    [
+      'Pick',
+      'Omit',
+      'Partial',
+      'Required',
+      'Readonly',
+      'Record',
+      'Exclude',
+      'Extract',
+      'NonNullable',
+    ].includes(name || '');
+
+  if (aliasName && isMappedUtility(aliasName)) {
+    return serializeMappedType(type, aliasName, sourceFile, seen, depth);
+  }
   if (isPrimitiveType(type)) return { kind: 'primitive', name: rawName };
   if (seen.has(type)) return { kind: 'primitive', name: baseName };
   seen.add(type);
@@ -429,7 +458,7 @@ export function serializeType(
     return { kind: 'reactNode', name: rawName };
   if (IMPORT_REF_PREFIXES.some((prefix) => rawName.startsWith(prefix)))
     return serializeImportRefObject(type, sourceFile, seen, depth);
-  if (type.isArray()) return serializeArrayType(type, sourceFile, seen, depth);
+  if (type.isArray()) return serializeArrayType(type, sourceFile, seen, 0);
 
   const resolvedImport = resolveImportAliasRef(type, sourceFile);
   if (resolvedImport) return resolvedImport;

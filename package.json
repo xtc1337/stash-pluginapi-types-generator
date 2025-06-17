@@ -5,28 +5,41 @@
   "scripts": {
     "prepare": "husky",
     "format": "prettier . --write",
-    "lint": "eslint --fix"
+    "lint": "eslint --fix",
+    "stash:setup": "cd ./stash && go mod tidy",
+    "stash:generate": "cd ./stash && mingw32-make generate",
+    "stash:pre-ui": "cd ./stash && mingw32-make pre-ui",
+    "stash:update": "git submodule update --remote --init stash",
+    "stash": "yarn stash:pre-ui && yarn stash:generate",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
-    "husky": "^9.1.7",
-    "ts-node": "^10.9.2",
-    "typescript": "~4.8.4",
+    "@commitlint/cli": "^18.4.4",
+    "@commitlint/config-conventional": "^18.4.4",
+    "@eslint/compat": "^1.1.1",
+    "@eslint/js": "^9.9.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/react-hooks": "^8.0.1",
+    "@vitest/ui": "^3.2.3",
+    "conventional-changelog-conventionalcommits": "^8.0.0",
+    "conventional-recommended-bump": "^11.0.0",
     "cross-env": "^7.0.3",
     "dotenv": "^16.4.5",
     "eslint": "^9.9.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.2.1",
-    "@eslint/compat": "^1.1.1",
-    "@eslint/js": "^9.9.0",
-    "@commitlint/cli": "^18.4.4",
-    "@commitlint/config-conventional": "^18.4.4",
-    "conventional-recommended-bump": "^11.0.0",
-    "conventional-changelog-conventionalcommits": "^8.0.0",
+    "husky": "^9.1.7",
     "prettier": "^3.3.3",
-    "typescript-eslint": "^8.1.0"
+    "ts-node": "^10.9.2",
+    "typescript": "~4.8.4",
+    "typescript-eslint": "^8.1.0",
+    "vitest": "^3.2.3"
   },
   "dependencies": {
-    "ts-morph": "^16.0.0",
-    "@phenomnomnominal/tsquery": "^6.1.3"
+    "@phenomnomnominal/tsquery": "^6.1.3",
+    "ts-morph": "^16.0.0"
   }
 }

@@ -1,5 +1,4 @@
-import type { CompilerNodeToWrappedType, ts } from 'ts-morph';
-import { Node } from 'ts-morph';
+import { CompilerNodeToWrappedType, Node, Project, ts } from 'ts-morph';
 import { tsquery } from '@phenomnomnominal/tsquery';
 
 /**
@@ -39,4 +38,10 @@ export function queryTsMorphNode<T extends Node = Node>(
   return tsquery(node.compilerNode, selector).map((value) =>
     getNodeFromCompilerNode<T>(node, value),
   );
+}
+
+export function getProject(tsConfigFilePath: string) {
+  return new Project({
+    tsConfigFilePath,
+  });
 }

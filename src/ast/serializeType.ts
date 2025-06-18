@@ -1,5 +1,7 @@
 import {
+  ExportAssignment,
   Node,
+  ObjectLiteralExpression,
   SourceFile,
   Symbol,
   ts,
@@ -14,7 +16,9 @@ import {
   ObjectType,
   PrimitiveType,
   SerializedType,
+  UnionType,
 } from './types';
+import { queryTsMorphNode } from '../utils';
 
 // --- Constants ---
 const IMPORT_REF_PREFIXES = ['React.', 'ReactDOM.', 'GQL.', 'JSX.'];
@@ -154,7 +158,7 @@ function remapImportedLibrary(type: Type): ImportRefType | null {
       return {
         kind: 'importRef',
         name: `${prefix}.${symbol.getName()}`,
-        importPath: pkg,
+        importPath: cleanImportPath(pkg),
       };
     }
   }
@@ -299,11 +303,35 @@ function getIntersectionName(rootType: Type, types: SerializedType[]): string {
   return `${rootBase}<${joinedInner}>`;
 }
 
+/*
 function getImportPathFromType(type: Type): string | undefined {
   const importPathSymbol = type.getSymbol();
   return importPathSymbol
     ? getImportPathForSymbol(importPathSymbol)
     : undefined;
+} */
+
+function getImportPathFromType(type: Type): string | undefined {
+  const symbol = type.getSymbol();
+  const decl = symbol?.getDeclarations()?.[0];
+  const filePath = decl?.getSourceFile().getFilePath();
+
+  if (!filePath) return undefined;
+
+  return getModuleNameFromFilePath(filePath);
+}
+
+function getModuleNameFromFilePath(filePath: string): string | undefined {
+  const nodeModulesIndex = filePath.indexOf('node_modules/');
+  if (nodeModulesIndex === -1) return undefined;
+
+  const subpath = filePath.slice(nodeModulesIndex + 'node_modules/'.length);
+  const segments = subpath.split('/');
+
+  const isScoped = segments[0].startsWith('@');
+  return cleanImportPath(
+    isScoped ? `${segments[0]}/${segments[1]}` : segments[0],
+  );
 }
 
 function serializeImportRefObject(
@@ -411,6 +439,184 @@ function serializeMappedType(
     },
   };
 }
+function resolveImportRefFromType(
+  type: Type,
+  sourceFile: SourceFile,
+): ImportRefType | undefined {
+  const rawName = type.getText(sourceFile);
+
+  const match = rawName.match(/^typeof import\(".*node_modules\/(.+?)"\)/);
+  if (!match) return;
+
+  const fullPath = match[1]; // e.g. "@apollo/client/index.d.ts"
+  const segments = fullPath.split('/');
+
+  const isScoped = segments[0].startsWith('@');
+  const importPath = cleanImportPath(
+    isScoped ? `${segments[0]}/${segments[1]}` : segments[0],
+  );
+
+  return {
+    kind: 'importRef',
+    name: `typeof import("${importPath}")`,
+    importPath,
+  };
+}
+
+function cleanImportPath(path: string): string {
+  return path.replace('@types/', '');
+}
+
+function isExportEqualsModule(decl: Node | undefined): boolean {
+  const sourceFile = decl?.getSourceFile();
+  const hasExportEquals = sourceFile
+    ?.getExportAssignments()
+    .some((e) => e.isExportEquals());
+  if (hasExportEquals) return true;
+  // ✅ Also handle "declare module 'foo' { export default ... }"
+  const moduleDecl = decl?.getFirstAncestorByKind(
+    ts.SyntaxKind.ModuleDeclaration,
+  );
+  if (moduleDecl && moduleDecl.getName().startsWith("'")) {
+    const exports = moduleDecl.getDescendantsOfKind(
+      ts.SyntaxKind.ExportAssignment,
+    );
+    return exports.some((e) => !e.isExportEquals());
+  }
+
+  return false;
+}
+
+function getPossibleNamesFromExportAssignment(
+  ea: ExportAssignment,
+  sourceFile: SourceFile,
+): string[] {
+  const choices: string[] = [];
+  const expression = ea.getExpression();
+  if (Node.isIdentifier(expression)) {
+    const name = expression.getText();
+    choices.push(name);
+    const nodes = queryTsMorphNode(sourceFile, `Identifier[name="${name}"]`)
+      .map((node) => node.getParent())
+      .filter(Boolean);
+    nodes.forEach((node) => {
+      if (Node.isVariableDeclaration(node)) {
+        choices.push(node.getType().getText());
+      }
+    });
+  }
+  return choices;
+}
+function getExportModuleNames(decl: Node | undefined): string[] {
+  const sourceFile = decl?.getSourceFile();
+  if (!sourceFile) return [];
+  const hasExportEquals = sourceFile
+    .getExportAssignments()
+    .filter((e) => e.isExportEquals())
+    .flatMap((e) => getPossibleNamesFromExportAssignment(e, sourceFile));
+  if (hasExportEquals?.length) return hasExportEquals;
+  // ✅ Also handle "declare module 'foo' { export default ... }"
+  const moduleDecl = decl?.getFirstAncestorByKind(
+    ts.SyntaxKind.ModuleDeclaration,
+  );
+  if (moduleDecl && moduleDecl.getName().startsWith("'")) {
+    const exports = moduleDecl.getDescendantsOfKind(
+      ts.SyntaxKind.ExportAssignment,
+    );
+    return exports
+      .filter((e) => !e.isExportEquals())
+      .flatMap((e) => getPossibleNamesFromExportAssignment(e, sourceFile));
+  }
+
+  return [];
+}
+function resolveExportEqualsImportRef(
+  type: Type,
+  sourceFile: SourceFile,
+): ImportRefType | undefined {
+  const symbol = type.getSymbol();
+  const targetName = symbol?.getName();
+  const decl = symbol?.getDeclarations()?.[0];
+
+  if (!isExportEqualsModule(decl)) return;
+  /**
+   * In some cases you will have an export module declared like so
+   *      declare const Mousetrap: Mousetrap.MousetrapStatic;
+   *      export = Mousetrap;
+   *      export as namespace Mousetrap;
+   * In this case the `type` would have resolved to `Mousetrap.MousetrapStatic`.
+   * In this case we want to get all the exported names to see if the resolved `type` matches any
+   */
+  const exportNames = getExportModuleNames(decl);
+
+  /**
+   * Since the import came from your source file
+   * and you already know the type refers to an external symbol, scan your source file directly:
+   */
+  const imports = sourceFile.getImportDeclarations();
+
+  const possibleImportPaths: string[] = [];
+  for (const importDecl of imports) {
+    const defaultImport = importDecl.getDefaultImport();
+    if (!defaultImport) continue;
+
+    /**
+     * This does a deeper match:
+     *
+     * It checks if the default import is an alias for the same declaration as the type symbol.
+     *
+     * So import Mousetrap resolving to export = Mousetrap → matches MousetrapStatic properly.
+     */
+    const importSymbol = defaultImport.getSymbol();
+    const aliased = importSymbol?.getAliasedSymbol();
+    const aliasedName = aliased?.getName();
+    const importedDecl = aliased?.getDeclarations()?.[0];
+    const importPath = importDecl.getModuleSpecifierValue();
+
+    // Prefer: exact match
+    if (importedDecl === decl) {
+      return {
+        kind: 'importRef',
+        name: `typeof import("${importPath}")`,
+        importPath,
+      };
+    }
+
+    // Fallback: compare names (string match)
+    if (
+      aliasedName === targetName ||
+      importSymbol?.getName() === targetName ||
+      (aliasedName && exportNames.includes(aliasedName))
+    ) {
+      return {
+        kind: 'importRef',
+        name: `typeof import("${importPath}")`,
+        importPath,
+      };
+    }
+    /**
+     * matches cases like
+     * import Mousetrap from 'mousetrap';
+     * // .d.ts
+     * declare const Mousetrap: Mousetrap.MousetrapStatic;
+     *
+     * export = Mousetrap;
+     *
+     * export as namespace Mousetrap;
+     */
+    if (aliasedName && targetName?.startsWith(aliasedName)) {
+      possibleImportPaths.push(importPath);
+    }
+  }
+  const exactMatch = possibleImportPaths.find((p) => p === targetName);
+  if (exactMatch) {
+    return {
+      kind: 'importRef',
+      name: `typeof import("${exactMatch}")`,
+      importPath: exactMatch,
+    };
+  }
+}
 // --- Main Serializer ---
 export function serializeType(
   type: Type,
@@ -422,6 +628,32 @@ export function serializeType(
     return { kind: 'primitive', name: '[MaxDepthExceeded]' };
 
   const rawName = type.getText();
+
+  const typeofImportMatch = rawName.match(
+    /^typeof import\(".*node_modules\/(.+?)"\)/,
+  );
+  if (typeofImportMatch) {
+    const fullPath = typeofImportMatch[1]; // e.g. "@apollo/client/index.d.ts"
+    const segments = fullPath.split('/');
+
+    const isScoped = segments[0].startsWith('@');
+    const importPath = cleanImportPath(
+      isScoped ? `${segments[0]}/${segments[1]}` : segments[0],
+    );
+
+    // Remove common suffixes like dist or index.* after the package name
+    const trimmedSegments = segments.slice(0, isScoped ? 2 : 1); // start with just the importPath
+    if (trimmedSegments[0] == '@types') {
+      trimmedSegments.shift();
+    }
+
+    return {
+      kind: 'importRef',
+      name: `typeof import("${trimmedSegments.join('/')}")`,
+      importPath,
+    };
+  }
+
   const baseName = getBaseName(type);
 
   const aliasSymbol = type.getAliasSymbol();
@@ -451,6 +683,13 @@ export function serializeType(
   if (isClassOrAbstract(type)) {
     return serializeClassType(type, sourceFile, seen, depth);
   }
+  // CommonJS-style `export =` default import (e.g., Mousetrap)
+  const exportEqualsImportRef = resolveExportEqualsImportRef(type, sourceFile);
+  if (exportEqualsImportRef) return exportEqualsImportRef;
+
+  const importRef = resolveImportRefFromType(type, sourceFile);
+  if (importRef) return importRef;
+
   if (type.getCallSignatures().length > 0)
     return serializeFunctionType(type, sourceFile, seen, depth);
   if (rawName === 'React.FC') return { kind: 'empty', name: 'React.FC' };
@@ -503,4 +742,124 @@ export function serializeTypeAlias(
     default:
       return base;
   }
+}
+
+function serializeInitializer(
+  initializer: Node,
+  sourceFile: SourceFile,
+): SerializedType {
+  // --- Case 1: Object literal ---
+  if (Node.isObjectLiteralExpression(initializer)) {
+    return serializeObjectLiteralExpression(initializer, sourceFile);
+  }
+
+  // --- Case 2: Array literal ---
+  if (Node.isArrayLiteralExpression(initializer)) {
+    const elements = initializer.getElements();
+    const constraints = elements.map((el) =>
+      serializeInitializer(el, sourceFile),
+    );
+
+    const unified =
+      constraints.length === 0
+        ? undefined
+        : constraints.every(
+              (c) => JSON.stringify(c) === JSON.stringify(constraints[0]),
+            )
+          ? constraints[0]
+          : ({
+              kind: 'union',
+              name: 'mixed',
+              props: constraints,
+            } as UnionType);
+
+    return {
+      kind: 'primitive',
+      name: 'Array',
+      ...(unified ? { constraint: unified } : {}),
+    };
+  }
+
+  // --- Case 3: Walk back from symbol to import ---
+  const symbol = initializer.getSymbol?.();
+  const decl = symbol?.getDeclarations()?.[0];
+
+  const importDecl = decl?.getFirstAncestorByKind(
+    ts.SyntaxKind.ImportDeclaration,
+  );
+  const importPath = importDecl?.getModuleSpecifierValue();
+
+  if (importPath) {
+    return {
+      kind: 'importRef',
+      name: `typeof import("${importPath}")`,
+      importPath,
+    };
+  }
+
+  // --- Fallback: serialize as type ---
+  const type = decl?.getType?.() ?? initializer.getType?.();
+
+  if (!type) {
+    return { kind: 'primitive', name: 'unknown' };
+  }
+
+  return serializeType(type, sourceFile);
+}
+export function serializeObjectLiteralExpression(
+  expr: ObjectLiteralExpression,
+  sourceFile: SourceFile,
+): ObjectType {
+  const props: Record<string, SerializedType> = {};
+
+  for (const prop of expr.getProperties()) {
+    if (Node.isPropertyAssignment(prop)) {
+      const name = prop.getName();
+      const initializer = prop.getInitializerOrThrow();
+      props[name] = serializeInitializer(initializer, sourceFile);
+    } else if (Node.isShorthandPropertyAssignment(prop)) {
+      const name = prop.getName();
+      const symbol = prop.getSymbol();
+
+      if (symbol) {
+        const decl = symbol.getDeclarations()?.[0];
+
+        const resolvedType = decl?.getType?.();
+        props[name] = resolvedType
+          ? serializeType(resolvedType, sourceFile)
+          : { kind: 'primitive', name: 'unknown' };
+      } else {
+        props[name] = { kind: 'primitive', name: 'unknown' };
+      }
+    } else if (Node.isMethodDeclaration(prop)) {
+      const name = prop.getName();
+      const returnType = prop.getReturnType();
+      const parameters = prop.getParameters().map((p) => ({
+        name: p.getName(),
+        type: serializeType(p.getType(), sourceFile),
+      }));
+
+      props[name] = {
+        kind: 'function',
+        name,
+        args: Object.fromEntries(parameters.map((p) => [p.name, p.type])),
+        returnType: serializeType(returnType, sourceFile),
+      };
+    } else if (Node.isSpreadAssignment(prop)) {
+      const exprText = prop.getExpression().getText();
+      const spreadType = prop.getExpression().getType();
+
+      props[`...${exprText}`] = serializeType(spreadType, sourceFile);
+    }
+  }
+  const parent = expr.getParent();
+  let name = 'AnonymousObject';
+  if (Node.isVariableDeclaration(parent)) name = parent.getName();
+  if (Node.isPropertyAssignment(parent)) name = parent.getNameNode().getText();
+
+  return {
+    kind: 'object',
+    name,
+    props,
+  };
 }

@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/stashapp-types-generator.iml" filepath="$PROJECT_DIR$/stashapp-types-generator.iml" />
+      <module fileurl="file://$PROJECT_DIR$/stash-pluginapi-types-generator.iml" filepath="$PROJECT_DIR$/stash-pluginapi-types-generator.iml" />
     </modules>
   </component>
 </project>

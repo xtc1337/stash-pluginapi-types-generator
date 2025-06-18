@@ -26,6 +26,7 @@ export type FunctionType = {
   name: string;
   args: Record<string, SerializedType>;
   returnType: SerializedType;
+  constraint?: SerializedType;
 };
 
 export type UnionType = {

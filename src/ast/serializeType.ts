@@ -165,14 +165,47 @@ function remapImportedLibrary(type: Type): ImportRefType | null {
   return null;
 }
 
+function isTypeFunctionLike(type: Type): boolean {
+  const baseTypes = type.getBaseTypes();
+
+  // ✅ Case: T extends Function
+
+  const extendsFunction =
+    baseTypes.some((t) => t.getText() === 'Function') ||
+    type.getConstraint()?.getText() === 'Function';
+  return (
+    extendsFunction ||
+    type.getCallSignatures().length > 0 ||
+    type.getConstructSignatures().length > 0
+  );
+}
 // --- Specialized Serializers ---
 function serializeFunctionType(
   type: Type,
   sourceFile: SourceFile,
   seen: WeakSet<Type>,
   depth: number,
-): FunctionType {
+): FunctionType | PrimitiveType {
   const sig = type.getCallSignatures()[0];
+  if (!sig) {
+    // Check if it's a generic extending Function
+    if (type.isTypeParameter()) {
+      const constraint = type.getConstraint();
+      if (constraint?.getText() === 'Function') {
+        return {
+          kind: 'primitive',
+          name: 'Function',
+        };
+      }
+    }
+
+    // If no call signature at all and not constrained properly, treat as unknown
+    return {
+      kind: 'primitive',
+      name: 'unknown',
+    };
+  }
+
   const returnType = sig.getReturnType();
   const params = sig.getParameters();
 
@@ -188,14 +221,53 @@ function serializeFunctionType(
     const typeText = getBaseName(paramType);
     const paramName = param.getName();
 
+    // ✅ Case: T extends Function
+    const isTypeParameter = paramType.isTypeParameter();
+
+    if (isTypeParameter && isTypeFunctionLike(type)) {
+      args[paramName] = {
+        kind: 'function',
+        name: paramType.getText(),
+        constraint: { kind: 'primitive', name: 'Function' },
+        args: {},
+        returnType: { kind: 'primitive', name: 'unknown' },
+      };
+      paramStrings.push(`${paramName}: ${paramType.getText()}`);
+      continue;
+    }
+
+    // ✅ Case: plain Function type
+    if (paramType.getText() === 'Function') {
+      args[paramName] = { kind: 'primitive', name: 'Function' };
+      paramStrings.push(`${paramName}: Function`);
+      continue;
+    }
+
+    // 🔁 Normal path
+
     args[paramName] = serializeType(paramType, sourceFile, seen, depth + 1);
 
     paramStrings.push(`${paramName}: ${typeText}`);
   }
+  const typeParams = sig.getTypeParameters();
+  let genericPrefix = '';
 
-  const formattedSignature = `(${paramStrings.join(
-    ', ',
-  )}) => ${getBaseName(returnType)}`;
+  if (typeParams.length > 0) {
+    const genericParts = typeParams.map((tp) => {
+      const decl = tp.getSymbol()?.getDeclarations()?.[0];
+      if (!Node.isTypeParameterDeclaration(decl)) return '';
+
+      const name = decl.getName();
+      const constraintType = decl.getConstraint();
+      const constraintText = constraintType?.getText();
+
+      return constraintText ? `${name} extends ${constraintText}` : name;
+    });
+
+    genericPrefix = `<${genericParts.join(', ')}>`;
+  }
+
+  const formattedSignature = `${genericPrefix}(${paramStrings.join(', ')}) => ${getBaseName(returnType)}`;
 
   return {
     kind: 'function',
@@ -690,7 +762,7 @@ export function serializeType(
   const importRef = resolveImportRefFromType(type, sourceFile);
   if (importRef) return importRef;
 
-  if (type.getCallSignatures().length > 0)
+  if (isTypeFunctionLike(type))
     return serializeFunctionType(type, sourceFile, seen, depth);
   if (rawName === 'React.FC') return { kind: 'empty', name: 'React.FC' };
   if (rawName === 'React.PropsWithChildren<{}>')
@@ -780,31 +852,50 @@ function serializeInitializer(
     };
   }
 
-  // --- Case 3: Walk back from symbol to import ---
-  const symbol = initializer.getSymbol?.();
-  const decl = symbol?.getDeclarations()?.[0];
-
-  const importDecl = decl?.getFirstAncestorByKind(
-    ts.SyntaxKind.ImportDeclaration,
-  );
-  const importPath = importDecl?.getModuleSpecifierValue();
-
-  if (importPath) {
-    return {
-      kind: 'importRef',
-      name: `typeof import("${importPath}")`,
-      importPath,
-    };
+  // Handle function expressions (arrow or traditional)
+  if (
+    Node.isFunctionExpression(initializer) ||
+    Node.isArrowFunction(initializer)
+  ) {
+    return serializeFunctionType(
+      initializer.getType(),
+      sourceFile,
+      new WeakSet(),
+      0,
+    );
   }
 
-  // --- Fallback: serialize as type ---
-  const type = decl?.getType?.() ?? initializer.getType?.();
+  // Handle identifiers (may be imports or local symbols)
+  if (Node.isIdentifier(initializer)) {
+    const symbol = initializer.getSymbol();
+    const aliased = symbol?.getAliasedSymbol();
+    const resolvedSymbol = aliased ?? symbol;
+    const decl = resolvedSymbol?.getDeclarations()?.[0];
 
-  if (!type) {
-    return { kind: 'primitive', name: 'unknown' };
+    // You may still want this to debug or match importPath later
+    const importDecl = decl?.getFirstAncestorByKind(
+      ts.SyntaxKind.ImportDeclaration,
+    );
+    const importPath = importDecl?.getModuleSpecifierValue();
+
+    const type = resolvedSymbol?.getTypeAtLocation(initializer);
+    if (type) {
+      return serializeType(type, sourceFile);
+    }
+    if (importPath) {
+      return {
+        kind: 'importRef',
+        name: `typeof import("${importPath}")`,
+        importPath,
+      };
+    }
   }
 
-  return serializeType(type, sourceFile);
+  // Default fallback
+  return {
+    kind: 'primitive',
+    name: 'unknown',
+  };
 }
 export function serializeObjectLiteralExpression(
   expr: ObjectLiteralExpression,

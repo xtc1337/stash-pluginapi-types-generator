@@ -1,4 +1,4 @@
-import { ITypeBuilder } from './types';
+import { BuilderContext, ITypeBuilder } from './types';
 import { ObjectLiteralExpression, SourceFile } from 'ts-morph';
 import { ObjectType, serializeObjectLiteralExpression } from '../ast';
 import { queryTsMorphNode } from '../utils';
@@ -6,7 +6,7 @@ import { queryTsMorphNode } from '../utils';
 export class NamespaceBuilder implements ITypeBuilder {
   private _objectTypes: ObjectType[] = [];
   constructor(private readonly ns: string[]) {}
-  process(sourceFile: SourceFile): void {
+  process(sourceFile: SourceFile, _ctx: BuilderContext): void {
     if (!sourceFile.getFilePath().includes('src/pluginApi.tsx')) return;
     if (!this.ns.length) return;
     this.ns.forEach((ns) => {

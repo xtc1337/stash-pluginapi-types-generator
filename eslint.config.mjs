@@ -20,7 +20,16 @@ export default tseslint
       plugins: {},
     },
     {
-      rules: {},
+      rules: {
+        '@typescript-eslint/no-unused-vars': [
+          'warn', // or "error"
+          {
+            argsIgnorePattern: '^_',
+            varsIgnorePattern: '^_',
+            caughtErrorsIgnorePattern: '^_',
+          },
+        ],
+      },
     },
   )
   .map((config) => ({

@@ -132,4 +132,5 @@ dist
 assets/payload.json
 .idea
 *.iml
+.idea/*
 

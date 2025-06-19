@@ -6,9 +6,11 @@ import {
   Node,
   SourceFile,
 } from 'ts-morph';
-import { queryTsMorphNode } from '../utils';
+import { normalizePath, queryTsMorphNode } from '../utils';
 import {
   EmptyType,
+  isImportRefObjectType,
+  isObjectType,
   ReactNodeType,
   SerializedType,
   serializeType,
@@ -37,7 +39,8 @@ function resolveFunctionInfo(node: ArrowFunction | FunctionExpression) {
       } as EmptyType,
     };
 
-  if (param.getText().includes('React.PropsWithChildren<{}>'))
+  const parmText = param.getText();
+  if (parmText.includes('React.PropsWithChildren<{}>'))
     return {
       propsType: {
         kind: 'reactNode',
@@ -94,6 +97,28 @@ export const setComponentsBuilderConfigDefaults = (
   };
 };
 
+function getImportValueType(
+  type: SerializedType,
+  propsType: SerializedType,
+): string | undefined {
+  if (!isObjectType(type)) return;
+  if (propsType.name.startsWith('{')) {
+    // already resolved
+    return propsType.name;
+  }
+  const filePath = normalizePath(type.filePath);
+  if (!filePath.includes('v2.5/src/')) return;
+
+  const valueType = (filePath.split('v2.5/src/').pop() as string).replace(
+    /\.(tsx|ts)$/,
+    '',
+  );
+  if (propsType.name.includes('PluginSetting')) {
+    console.log('found');
+  }
+
+  return `typeof import ("./${valueType}").${propsType.name}`;
+}
 export class ComponentsBuilder implements ITypeBuilder {
   private _componentInfos: ComponentInfo[] = [];
   private readonly config: ComponentsBuilderConfig;
@@ -126,6 +151,7 @@ export class ComponentsBuilder implements ITypeBuilder {
         if (propsType.kind === 'object') {
           ctx.typeRegistry.addType(propsType);
         }
+        ctx.logger.log(`Found component ${componentInfo.name}`);
         this._componentInfos.push(componentInfo);
       } catch (e) {
         console.log(sourceFile.getFilePath());
@@ -165,10 +191,37 @@ export class ComponentsBuilder implements ITypeBuilder {
       ...resolveFunctionInfo(functionNode),
     };
   }
-  public write({ writer }: BuilderContext): void {
-    writer.writeLine('export const components = {');
-    this.componentInfos.forEach(({ name, propsType }) => {
-      writer.writeLine(`'\t${name}': ${propsType.name},`);
+  public write({ writer, typeRegistry }: BuilderContext): void {
+    writer.writeLine('export declare let components = {');
+    this.componentInfos.forEach((info) => {
+      const { name, propsType } = info;
+      let valueType = propsType.name;
+      const type =
+        isObjectType(propsType) &&
+        typeRegistry.getType(propsType.name, propsType.filePath);
+
+      if (type) {
+        if (isObjectType(type)) {
+          if (type.name.includes('.')) {
+            console.log(type);
+          } else if ('importPath' in type && type.importPath) {
+            valueType = type.importPath;
+          } else {
+            valueType = getImportValueType(type, propsType) ?? valueType;
+          }
+        }
+      } else if (isImportRefObjectType(propsType)) {
+        valueType = propsType.types.reduce((acc, refType) => {
+          return acc.replace(
+            refType.name,
+            getImportValueType(refType, refType) ?? refType.name,
+          );
+        }, valueType);
+      } else {
+        // console.log(name, propsType.name, propsType.kind);
+      }
+
+      writer.writeLine(`\t'${name}': ${valueType},`);
     });
     writer.writeLine('}');
   }

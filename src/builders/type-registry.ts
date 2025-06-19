@@ -12,7 +12,9 @@ export class TypeRegistry {
 
   public addType(typeDef: ObjectType): void {
     if (!this.types[typeDef.name]) {
-      this.types[typeDef.name] = typeDef.props;
+      this.types[typeDef.name] = {};
+    } else {
+      this.types[typeDef.name][typeDef.filePath] = typeDef;
     }
     const visit = (def: SerializedType) => {
       if (isObjectType(def)) {
@@ -31,7 +33,7 @@ export class TypeRegistry {
     });
   }
 
-  public getTypes(): Record<string, Record<string, SerializedType>> {
-    return this.types;
+  public getType(name: string, filePath: string): SerializedType | undefined {
+    return this.types[name][filePath];
   }
 }

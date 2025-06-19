@@ -1,5 +1,7 @@
 import { CompilerNodeToWrappedType, Node, Project, ts } from 'ts-morph';
 import { tsquery } from '@phenomnomnominal/tsquery';
+import path from 'path';
+import { join, normalize } from 'node:path';
 
 /**
  * _getNodeFromCompilerNode is not emitted on ts-morph's Node class so we
@@ -39,9 +41,20 @@ export function queryTsMorphNode<T extends Node = Node>(
     getNodeFromCompilerNode<T>(node, value),
   );
 }
+export const STASH_DIR = path.join(__dirname, '..', '..', 'stash');
+export const STASH_UI_DIR = path.join(STASH_DIR, 'ui', 'v2.5');
 
+export function getStashTsConfigPath() {
+  return getStashFilePath('tsconfig.json');
+}
+export function getStashFilePath(uri: string) {
+  return path.join(STASH_UI_DIR, uri);
+}
 export function getProject(tsConfigFilePath: string) {
   return new Project({
     tsConfigFilePath,
   });
+}
+export function normalizePath(p: string) {
+  return normalize(p).replace(/\\/g, '/');
 }

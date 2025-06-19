@@ -16,9 +16,11 @@ import {
   ObjectType,
   PrimitiveType,
   SerializedType,
+  TypeDefRefType,
   UnionType,
 } from './types';
 import { queryTsMorphNode } from '../utils';
+import { serializeMaybeImportRef } from './seralizeObjectLiteralExpression';
 
 // --- Constants ---
 const IMPORT_REF_PREFIXES = ['React.', 'ReactDOM.', 'GQL.', 'JSX.'];
@@ -127,6 +129,14 @@ function cleanImportName(name: string): string {
 }
 function getBaseName(type: Type): string {
   const typeName = type.getText();
+  //{ pluginID: string; settings: import("E:/DEV/_FreeLance/stash/ui/v2.5/src/core/generated-graphql").PluginSetting[]; }
+  if (typeName.startsWith('{')) {
+    return typeName.replace(
+      /(import\(".*?"\)\.)/g,
+      (_: string, inner: string) =>
+        inner.includes('src/core/generated-graphql') ? 'GQL.' : inner,
+    );
+  }
   const raw = typeName.split('<')[0].trim();
   const clean = cleanImportName(raw);
 
@@ -180,7 +190,7 @@ function isTypeFunctionLike(type: Type): boolean {
   );
 }
 // --- Specialized Serializers ---
-function serializeFunctionType(
+export function serializeFunctionType(
   type: Type,
   sourceFile: SourceFile,
   seen: WeakSet<Type>,
@@ -361,10 +371,12 @@ function serializeObjectType(
       depth + 1,
     );
   }
+
   return {
     kind: 'object',
     name: baseName,
     props,
+    filePath: sourceFile.getFilePath(),
     importPath: getImportPathFromType(type),
   };
 }
@@ -406,45 +418,62 @@ function getModuleNameFromFilePath(filePath: string): string | undefined {
   );
 }
 
+function maybeSerializeInnerImportReftTypeArg(
+  type: Type,
+  sourceFile: SourceFile,
+  seen: WeakSet<Type>,
+  depth: number,
+): ImportRefObjectType | undefined {
+  const typeArgs =
+    type.getAliasTypeArguments?.() ?? type.getTypeArguments?.() ?? [];
+  const inner = typeArgs[0];
+  if (!inner) return;
+  const innerText = inner.getText();
+  if (innerText === '{}') return;
+  const types = inner.isIntersection() ? inner.getIntersectionTypes() : [inner];
+
+  const innerTypes = types.map((t) => {
+    const serialized = serializeType(t, sourceFile, seen, depth + 1);
+    if (
+      (serialized.kind === 'object' ||
+        serialized.kind === 'importRef' ||
+        serialized.kind === 'importRefObject') &&
+      serialized.name.startsWith('import("')
+    ) {
+      return { ...serialized, name: cleanImportName(serialized.name) };
+    }
+    return serialized;
+  });
+
+  const mergedProps: Record<string, SerializedType> = {};
+  for (const t of innerTypes) {
+    if (t.kind === 'object' || t.kind === 'importRefObject') {
+      Object.assign(mergedProps, t.props);
+    }
+  }
+
+  return {
+    kind: 'importRefObject',
+    name: getIntersectionName(type, innerTypes),
+    types: innerTypes,
+    props: mergedProps,
+    importPath: getImportPathFromType(type),
+  };
+}
+
 function serializeImportRefObject(
   type: Type,
   sourceFile: SourceFile,
   seen: WeakSet<Type>,
   depth: number,
 ): ImportRefObjectType | ImportRefType {
-  const typeArgs =
-    type.getAliasTypeArguments?.() ?? type.getTypeArguments?.() ?? [];
-  const inner = typeArgs[0];
-
-  if (inner?.isIntersection()) {
-    const innerTypes = inner.getIntersectionTypes().map((t) => {
-      const serialized = serializeType(t, sourceFile, seen, depth + 1);
-      if (
-        (serialized.kind === 'object' ||
-          serialized.kind === 'importRef' ||
-          serialized.kind === 'importRefObject') &&
-        serialized.name.startsWith('import("')
-      ) {
-        return { ...serialized, name: cleanImportName(serialized.name) };
-      }
-      return serialized;
-    });
-
-    const mergedProps: Record<string, SerializedType> = {};
-    for (const t of innerTypes) {
-      if (t.kind === 'object' || t.kind === 'importRefObject') {
-        Object.assign(mergedProps, t.props);
-      }
-    }
-
-    return {
-      kind: 'importRefObject',
-      name: getIntersectionName(type, innerTypes),
-      types: innerTypes,
-      props: mergedProps,
-      importPath: getImportPathFromType(type),
-    };
-  }
+  const maybeInnerImportRefObject = maybeSerializeInnerImportReftTypeArg(
+    type,
+    sourceFile,
+    seen,
+    depth,
+  );
+  if (maybeInnerImportRefObject) return maybeInnerImportRefObject;
 
   return {
     kind: 'importRef',
@@ -689,6 +718,7 @@ function resolveExportEqualsImportRef(
     };
   }
 }
+
 // --- Main Serializer ---
 export function serializeType(
   type: Type,
@@ -814,143 +844,4 @@ export function serializeTypeAlias(
     default:
       return base;
   }
-}
-
-function serializeInitializer(
-  initializer: Node,
-  sourceFile: SourceFile,
-): SerializedType {
-  // --- Case 1: Object literal ---
-  if (Node.isObjectLiteralExpression(initializer)) {
-    return serializeObjectLiteralExpression(initializer, sourceFile);
-  }
-
-  // --- Case 2: Array literal ---
-  if (Node.isArrayLiteralExpression(initializer)) {
-    const elements = initializer.getElements();
-    const constraints = elements.map((el) =>
-      serializeInitializer(el, sourceFile),
-    );
-
-    const unified =
-      constraints.length === 0
-        ? undefined
-        : constraints.every(
-              (c) => JSON.stringify(c) === JSON.stringify(constraints[0]),
-            )
-          ? constraints[0]
-          : ({
-              kind: 'union',
-              name: 'mixed',
-              props: constraints,
-            } as UnionType);
-
-    return {
-      kind: 'primitive',
-      name: 'Array',
-      ...(unified ? { constraint: unified } : {}),
-    };
-  }
-
-  // Handle function expressions (arrow or traditional)
-  if (
-    Node.isFunctionExpression(initializer) ||
-    Node.isArrowFunction(initializer)
-  ) {
-    return serializeFunctionType(
-      initializer.getType(),
-      sourceFile,
-      new WeakSet(),
-      0,
-    );
-  }
-
-  // Handle identifiers (may be imports or local symbols)
-  if (Node.isIdentifier(initializer)) {
-    const symbol = initializer.getSymbol();
-    const aliased = symbol?.getAliasedSymbol();
-    const resolvedSymbol = aliased ?? symbol;
-    const decl = resolvedSymbol?.getDeclarations()?.[0];
-
-    // You may still want this to debug or match importPath later
-    const importDecl = decl?.getFirstAncestorByKind(
-      ts.SyntaxKind.ImportDeclaration,
-    );
-    const importPath = importDecl?.getModuleSpecifierValue();
-
-    const type = resolvedSymbol?.getTypeAtLocation(initializer);
-    if (type) {
-      return serializeType(type, sourceFile);
-    }
-    if (importPath) {
-      return {
-        kind: 'importRef',
-        name: `typeof import("${importPath}")`,
-        importPath,
-      };
-    }
-  }
-
-  // Default fallback
-  return {
-    kind: 'primitive',
-    name: 'unknown',
-  };
-}
-export function serializeObjectLiteralExpression(
-  expr: ObjectLiteralExpression,
-  sourceFile: SourceFile,
-): ObjectType {
-  const props: Record<string, SerializedType> = {};
-
-  for (const prop of expr.getProperties()) {
-    if (Node.isPropertyAssignment(prop)) {
-      const name = prop.getName();
-      const initializer = prop.getInitializerOrThrow();
-      props[name] = serializeInitializer(initializer, sourceFile);
-    } else if (Node.isShorthandPropertyAssignment(prop)) {
-      const name = prop.getName();
-      const symbol = prop.getSymbol();
-
-      if (symbol) {
-        const decl = symbol.getDeclarations()?.[0];
-
-        const resolvedType = decl?.getType?.();
-        props[name] = resolvedType
-          ? serializeType(resolvedType, sourceFile)
-          : { kind: 'primitive', name: 'unknown' };
-      } else {
-        props[name] = { kind: 'primitive', name: 'unknown' };
-      }
-    } else if (Node.isMethodDeclaration(prop)) {
-      const name = prop.getName();
-      const returnType = prop.getReturnType();
-      const parameters = prop.getParameters().map((p) => ({
-        name: p.getName(),
-        type: serializeType(p.getType(), sourceFile),
-      }));
-
-      props[name] = {
-        kind: 'function',
-        name,
-        args: Object.fromEntries(parameters.map((p) => [p.name, p.type])),
-        returnType: serializeType(returnType, sourceFile),
-      };
-    } else if (Node.isSpreadAssignment(prop)) {
-      const exprText = prop.getExpression().getText();
-      const spreadType = prop.getExpression().getType();
-
-      props[`...${exprText}`] = serializeType(spreadType, sourceFile);
-    }
-  }
-  const parent = expr.getParent();
-  let name = 'AnonymousObject';
-  if (Node.isVariableDeclaration(parent)) name = parent.getName();
-  if (Node.isPropertyAssignment(parent)) name = parent.getNameNode().getText();
-
-  return {
-    kind: 'object',
-    name,
-    props,
-  };
 }

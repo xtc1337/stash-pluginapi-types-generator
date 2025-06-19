@@ -65,4 +65,20 @@ describe('namespaces', () => {
       });
     });
   });
+  describe('utils', () => {
+    it('should extract the `utils` names', () => {
+      expectNS('utils', {
+        toEqual: (props, prop) =>
+          expect.objectContaining({
+            kind: 'function',
+            name: props[prop],
+          }),
+        props: {
+          NavUtils: '(stash: Stash) => Stash',
+          StashService: '',
+          loadComponents: '',
+        },
+      });
+    });
+  });
 });

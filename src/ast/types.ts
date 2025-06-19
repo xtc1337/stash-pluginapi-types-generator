@@ -18,6 +18,7 @@ export type ObjectType = {
   kind: 'object';
   name: string;
   props: Record<string, SerializedType>;
+  filePath: string;
   importPath?: string;
 };
 
@@ -58,6 +59,11 @@ export type MappedType = {
   };
 };
 
+export interface TypeDefRefType {
+  kind: 'typeDefRef';
+  name: string;
+  importPath: string;
+}
 export type SerializedType =
   | PrimitiveType
   | ObjectType
@@ -67,7 +73,8 @@ export type SerializedType =
   | ImportRefObjectType
   | EmptyType
   | ReactNodeType
-  | MappedType;
+  | MappedType
+  | TypeDefRefType;
 
 // Type Guards for SerializedType union members
 export function isPrimitiveType(type: SerializedType): type is PrimitiveType {
@@ -107,6 +114,9 @@ export function isReactNodeType(type: SerializedType): type is ReactNodeType {
 export function isMappedType(type: SerializedType): type is MappedType {
   return type.kind === 'mapped';
 }
+export function isTypeDefRefType(type: SerializedType): type is TypeDefRefType {
+  return type.kind === 'typeDefRef';
+}
 
 // Helper function to exhaustively check the type
 export function assertNever(value: never): never {
@@ -132,6 +142,8 @@ export function processSerializedType(type: SerializedType): string {
   } else if (isReactNodeType(type)) {
     return `ReactNode: ${type.name}`;
   } else if (isMappedType(type)) {
+    return `Mapped: ${type.name}`;
+  } else if (isTypeDefRefType(type)) {
     return `Mapped: ${type.name}`;
   } else {
     // This will cause a compile-time error if we haven't handled all cases

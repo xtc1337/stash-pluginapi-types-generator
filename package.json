@@ -13,7 +13,9 @@
     "stash": "yarn stash:pre-ui && yarn stash:generate",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "dev": "ts-node",
+    "gen-types": "npx ts-node ./src/index.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "^18.4.4",

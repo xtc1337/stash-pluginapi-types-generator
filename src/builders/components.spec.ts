@@ -46,5 +46,28 @@ describe('components', () => {
 
       expect(propsType?.types).toHaveLength(3);
     });
+    it('should infer React.FC<T> types', () => {
+      builder.process(
+        getStashSourceFile(
+          project,
+          'src/components/Performers/PerformerCard.tsx',
+        ),
+        ctx,
+      );
+      const infos = builder.componentInfos;
+      console.log(infos);
+    });
+
+    it('should infer React.FC<React.FC<{ urls: string[] | undefined }> types', () => {
+      builder.process(
+        getStashSourceFile(
+          project,
+          'src/components/Settings/SettingsPluginsPanel.tsx',
+        ),
+        ctx,
+      );
+      const infos = builder.componentInfos;
+      console.log(infos);
+    });
   });
 });

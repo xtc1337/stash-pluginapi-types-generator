@@ -1,5 +1,6 @@
-import { CodeBlockWriter, SourceFile } from 'ts-morph';
+import { CodeBlockWriter, Project, SourceFile } from 'ts-morph';
 import { TypeRegistry } from './type-registry';
+import { writeFileSync } from 'node:fs';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 export type DeepPartial<T> = T extends (...args: Any[]) => Any
@@ -20,10 +21,16 @@ export type DeepPartial<T> = T extends (...args: Any[]) => Any
 
 export type BuilderContext = {
   readonly writer: CodeBlockWriter;
+  readonly project: Project;
   readonly typeRegistry: TypeRegistry;
   readonly logger: typeof console;
+  readonly outDir: string;
+  readonly builders?: ITypeBuilder[];
+  readonly fs: {
+    writeFileSync: (filePath: string, data: string) => void;
+  };
 };
 export interface ITypeBuilder {
-  process(sourceFile: SourceFile, context: BuilderContext): void;
+  process?(sourceFile: SourceFile, context: BuilderContext): void;
   write(context: BuilderContext): void;
 }

@@ -133,7 +133,5 @@ assets/payload.json
 .idea
 *.iml
 .idea/*
-stash/*
-stash
 
 

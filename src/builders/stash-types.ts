@@ -2,10 +2,11 @@ import { BuilderContext, ITypeBuilder } from './types';
 import { MemoryEmitResultFile, Project, SourceFile } from 'ts-morph';
 import { getStashTsConfigPath, normalizePath } from '../utils';
 
-import { join, normalize } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { StandardizedFilePath } from '@ts-morph/common';
 import { ComponentsBuilder } from './components';
 
+const OUTPUT_DIR = 'dist';
 function exportInterface(file: MemoryEmitResultFile) {
   return {
     ...file,
@@ -16,7 +17,7 @@ function patch(
   file: MemoryEmitResultFile,
   components: string,
 ): MemoryEmitResultFile {
-  if (!file.filePath.endsWith('dist/patch.d.ts')) return file;
+  if (!file.filePath.endsWith(`${OUTPUT_DIR}/patch.d.ts`)) return file;
   return {
     ...file,
     text: file.text.replace(
@@ -25,20 +26,17 @@ function patch(
     ),
   };
 }
-function path(
-  file: MemoryEmitResultFile,
-  outDir: string,
-): MemoryEmitResultFile {
-  const p = file.filePath.split(`dist/`).pop();
+function path(file: MemoryEmitResultFile): MemoryEmitResultFile {
+  const p = file.filePath.split(`${OUTPUT_DIR}/`).pop();
   return {
     ...file,
     filePath: p
-      ? (normalizePath(join(outDir, p)) as StandardizedFilePath)
+      ? (normalizePath(join(OUTPUT_DIR, p)) as StandardizedFilePath)
       : file.filePath,
   };
 }
 function index(file: MemoryEmitResultFile): MemoryEmitResultFile {
-  if (!file.filePath.endsWith('dist/index.d.ts')) return file;
+  if (!file.filePath.endsWith(`${OUTPUT_DIR}/index.d.ts`)) return file;
   return {
     ...file,
     text: `export * from './pluginApi'`,
@@ -48,12 +46,17 @@ function imports(file: MemoryEmitResultFile): MemoryEmitResultFile {
   return {
     ...file,
     text: file.text.replace(
-      /(import*.+from\s+)'([^']+)'/g,
+      /(import*.+from\s+)['"]([^"']+)["'];$/gm,
       function (_: string, p1: string, p2: string) {
         if (p2.startsWith('src/')) {
-          return p2.replace('src/', './');
+          const filePath = file.filePath.replace(`${OUTPUT_DIR}/`, './');
+          const to = p2.replace('src/', '');
+          const p = relative(dirname(filePath), to);
+          const adjusted = normalizePath(p);
+
+          return `${p1}"${adjusted}"`;
         }
-        return `${p1}'${p2}'`;
+        return `${p1}"${p2}"`;
       },
     ),
   };
@@ -71,7 +74,7 @@ export class StashTypesBuilder implements ITypeBuilder {
         noEmit: false,
         declaration: true,
         emitDeclarationOnly: true,
-        outDir: 'dist',
+        outDir: ctx.outDir,
 
         // Optional for isolation:
         declarationMap: false,
@@ -89,7 +92,7 @@ export class StashTypesBuilder implements ITypeBuilder {
 
     for (const outputFile of emitResults.getFiles()) {
       const adjusted = patch(
-        exportInterface(path(index(imports(outputFile)), ctx.outDir)),
+        exportInterface(index(imports(path(outputFile)))),
         ctx.writer.toString(),
       );
       ctx.logger.debug(`Writing ${adjusted.filePath}`);

@@ -11,6 +11,7 @@ import {
   EmptyType,
   isImportRefObjectType,
   isObjectType,
+  maybeConvertLocalImportPath,
   ReactNodeType,
   SerializedType,
   serializeType,
@@ -55,6 +56,7 @@ function resolveFunctionInfo(node: ArrowFunction | FunctionExpression) {
 type ComponentInfo = {
   name: string;
   propsType: SerializedType;
+  importPath?: string;
 };
 
 const TO_OMIT = ['patch.tsx'];
@@ -113,9 +115,6 @@ function getImportValueType(
     /\.(tsx|ts)$/,
     '',
   );
-  if (propsType.name.includes('PluginSetting')) {
-    console.log('found');
-  }
 
   return `typeof import ("./${valueType}").${propsType.name}`;
 }
@@ -148,6 +147,7 @@ export class ComponentsBuilder implements ITypeBuilder {
         }
 
         const { propsType } = componentInfo;
+
         if (propsType.kind === 'object') {
           ctx.typeRegistry.addType(propsType);
         }
@@ -186,15 +186,28 @@ export class ComponentsBuilder implements ITypeBuilder {
     const name = nameNode.getLiteralValue();
     if (!this.config.hooks.beforeResolveFunctionInfo(node, name))
       return undefined;
+    if (name === 'ChangeButtonSetting') {
+      console.log(name);
+    }
+    const functionInfo = resolveFunctionInfo(functionNode);
+    const importPath = maybeConvertLocalImportPath(
+      node.getSourceFile().getFilePath(),
+      functionInfo.propsType.name,
+    );
     return {
       name,
-      ...resolveFunctionInfo(functionNode),
+      ...functionInfo,
+      importPath,
     };
   }
   public write({ writer, typeRegistry }: BuilderContext): void {
-    writer.writeLine('export declare let components = {');
+    writer.writeLine('export interface PatchableComponents {');
     this.componentInfos.forEach((info) => {
-      const { name, propsType } = info;
+      const { name, propsType, importPath } = info;
+
+      if (name === 'ChangeButtonSetting') {
+        console.log(name);
+      }
       let valueType = propsType.name;
       const type =
         isObjectType(propsType) &&
@@ -202,10 +215,8 @@ export class ComponentsBuilder implements ITypeBuilder {
 
       if (type) {
         if (isObjectType(type)) {
-          if (type.name.includes('.')) {
-            console.log(type);
-          } else if ('importPath' in type && type.importPath) {
-            valueType = type.importPath;
+          if (type.importPath) {
+            valueType = `React.FC<typeof ${type.importPath}>`;
           } else {
             valueType = getImportValueType(type, propsType) ?? valueType;
           }

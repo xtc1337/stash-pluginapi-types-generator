@@ -19,8 +19,9 @@ import {
   TypeDefRefType,
   UnionType,
 } from './types';
-import { queryTsMorphNode } from '../utils';
+import { normalizePath, queryTsMorphNode } from '../utils';
 import { serializeMaybeImportRef } from './seralizeObjectLiteralExpression';
+import { dirname, relative } from 'node:path';
 
 // --- Constants ---
 const IMPORT_REF_PREFIXES = ['React.', 'ReactDOM.', 'GQL.', 'JSX.'];
@@ -101,7 +102,7 @@ function getImportRefFromUnionType(
     if (!decl) continue;
 
     const filePath = decl.getSourceFile().getFilePath();
-    const name = getBaseName(elem);
+    const name = getBaseName(elem, sourceFile);
 
     // 🔹 Case 1: Expand if class or abstract class
     const isClass =
@@ -127,15 +128,46 @@ function cleanImportName(name: string): string {
   const match = name.match(/import\(".*?"\)\.(.+)/);
   return match ? match[1] : name;
 }
-function getBaseName(type: Type): string {
+function convertImportToLocalPath(
+  importPath: string,
+  sourceFile: SourceFile,
+  useImportFilePath?: boolean,
+) {
+  return importPath.replace(
+    /import\("([^"]+)"\)/g,
+    (_: string, inner: string) => {
+      if (inner.includes('src/core/generated-graphql')) return 'GQL';
+      if (inner.includes('node_modules/'))
+        return `import("${inner.split('node_modules/')[1]}")`;
+      if (inner.includes('ui/v2.5/src')) {
+        const currentFilePath = sourceFile
+          .getFilePath()
+          .split('ui/v2.5/src/')[1];
+        const importFilePath = inner.split('ui/v2.5/src/')[1];
+        const relativePath = useImportFilePath
+          ? `./${importFilePath}`
+          : relative(dirname(currentFilePath), importFilePath);
+
+        return `import("${normalizePath(relativePath)}")`;
+      }
+      return inner;
+    },
+  );
+}
+export function maybeConvertLocalImportPath(
+  filePath: string,
+  append?: string,
+): string | undefined {
+  if (!filePath.includes('ui/v2.5/src')) return undefined;
+  const importPath = `import("./${filePath.split('ui/v2.5/src/')[1].replace(/\.[tsx|ts]+$/g, '')}")`;
+  if (append) return `${importPath}.${append}`;
+  return importPath;
+}
+function getBaseName(type: Type, sourceFile: SourceFile): string {
   const typeName = type.getText();
   //{ pluginID: string; settings: import("E:/DEV/_FreeLance/stash/ui/v2.5/src/core/generated-graphql").PluginSetting[]; }
   if (typeName.startsWith('{')) {
-    return typeName.replace(
-      /(import\(".*?"\)\.)/g,
-      (_: string, inner: string) =>
-        inner.includes('src/core/generated-graphql') ? 'GQL.' : inner,
-    );
+    return convertImportToLocalPath(typeName, sourceFile);
   }
   const raw = typeName.split('<')[0].trim();
   const clean = cleanImportName(raw);
@@ -228,7 +260,7 @@ export function serializeFunctionType(
       ? param.getTypeAtLocation(decl)
       : param.getDeclaredType();
 
-    const typeText = getBaseName(paramType);
+    const typeText = getBaseName(paramType, sourceFile);
     const paramName = param.getName();
 
     // ✅ Case: T extends Function
@@ -277,7 +309,7 @@ export function serializeFunctionType(
     genericPrefix = `<${genericParts.join(', ')}>`;
   }
 
-  const formattedSignature = `${genericPrefix}(${paramStrings.join(', ')}) => ${getBaseName(returnType)}`;
+  const formattedSignature = `${genericPrefix}(${paramStrings.join(', ')}) => ${getBaseName(returnType, sourceFile)}`;
 
   return {
     kind: 'function',
@@ -294,7 +326,7 @@ function serializeUnionType(
   depth: number,
 ): SerializedType {
   const types = type.getUnionTypes();
-  const fullName = types.map((t) => getBaseName(t)).join(' | ');
+  const fullName = types.map((t) => getBaseName(t, sourceFile)).join(' | ');
 
   const allSimple = types.every(
     (t) => isPrimitiveType(t) || isStandardLibType(t),
@@ -356,7 +388,7 @@ function serializeObjectType(
   seen: WeakSet<Type>,
   depth: number,
 ): ObjectType {
-  const baseName = getBaseName(type);
+  const baseName = getBaseName(type, sourceFile);
   const props: Record<string, SerializedType> = {};
   for (const prop of type.getProperties()) {
     const decl = prop.getDeclarations()?.[0];
@@ -371,19 +403,39 @@ function serializeObjectType(
       depth + 1,
     );
   }
+  const constraintType = type.getConstraint();
 
+  const typeArgs = (
+    type.getAliasTypeArguments?.() ??
+    type.getTypeArguments?.() ??
+    []
+  ).map((typeArg) => serializeType(typeArg, sourceFile, seen, depth + 1));
+
+  if (baseName === 'IRatingNumberProps') {
+    console.log('lalala');
+  }
+  const importPath = getImportPathFromType(type, sourceFile);
   return {
     kind: 'object',
     name: baseName,
     props,
+    typeArgs,
+    constraint: constraintType
+      ? serializeType(constraintType, sourceFile, seen, depth + 1)
+      : undefined,
     filePath: sourceFile.getFilePath(),
-    importPath: getImportPathFromType(type),
+    importPath,
   };
 }
 
-function getIntersectionName(rootType: Type, types: SerializedType[]): string {
-  const rootBase = getBaseName(rootType);
-  const joinedInner = types.map((t) => cleanImportName(t.name)).join(' & ');
+function getIntersectionName(
+  rootType: Type,
+  types: SerializedType[],
+  sourceFile: SourceFile,
+): string {
+  const rootBase = getBaseName(rootType, sourceFile);
+  // no need to clean as they have already been mapped correctly from seralizeIntersection innerType check
+  const joinedInner = types.map((t) => t.name).join(' & ');
   return `${rootBase}<${joinedInner}>`;
 }
 
@@ -395,14 +447,26 @@ function getImportPathFromType(type: Type): string | undefined {
     : undefined;
 } */
 
-function getImportPathFromType(type: Type): string | undefined {
+function getImportPathFromType(
+  type: Type,
+  sourceFile: SourceFile,
+): string | undefined {
+  const typeText = type.getText();
+  if (typeText.startsWith('import("'))
+    return convertImportToLocalPath(typeText, sourceFile, true);
   const symbol = type.getSymbol();
+
   const decl = symbol?.getDeclarations()?.[0];
   const filePath = decl?.getSourceFile().getFilePath();
 
   if (!filePath) return undefined;
 
-  return getModuleNameFromFilePath(filePath);
+  let importPath = getModuleNameFromFilePath(filePath);
+  if (importPath) return importPath;
+
+  importPath = maybeConvertLocalImportPath(filePath);
+
+  if (importPath) return `${importPath}.${type.getText()}`;
 }
 
 function getModuleNameFromFilePath(filePath: string): string | undefined {
@@ -454,10 +518,10 @@ function maybeSerializeInnerImportReftTypeArg(
 
   return {
     kind: 'importRefObject',
-    name: getIntersectionName(type, innerTypes),
+    name: getIntersectionName(type, innerTypes, sourceFile),
     types: innerTypes,
     props: mergedProps,
-    importPath: getImportPathFromType(type),
+    importPath: getImportPathFromType(type, sourceFile),
   };
 }
 
@@ -477,8 +541,8 @@ function serializeImportRefObject(
 
   return {
     kind: 'importRef',
-    name: getBaseName(type),
-    importPath: getImportPathFromType(type),
+    name: getBaseName(type, sourceFile),
+    importPath: getImportPathFromType(type, sourceFile),
   };
 }
 
@@ -756,7 +820,7 @@ export function serializeType(
     };
   }
 
-  const baseName = getBaseName(type);
+  const baseName = getBaseName(type, sourceFile);
 
   const aliasSymbol = type.getAliasSymbol();
   const aliasName = aliasSymbol?.getName();

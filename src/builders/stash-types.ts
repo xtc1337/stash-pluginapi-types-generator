@@ -1,12 +1,34 @@
 import { BuilderContext, ITypeBuilder } from './types';
-import { MemoryEmitResultFile, Project, SourceFile } from 'ts-morph';
+import { MemoryEmitResultFile, Project } from 'ts-morph';
 import { getStashTsConfigPath, normalizePath } from '../utils';
 
-import { join, dirname, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { StandardizedFilePath } from '@ts-morph/common';
 import { ComponentsBuilder } from './components';
 
 const OUTPUT_DIR = 'dist';
+
+function pluginApi(file: MemoryEmitResultFile): MemoryEmitResultFile {
+  if (!file.filePath.endsWith(`${OUTPUT_DIR}/pluginApi.d.ts`)) return file;
+
+  const replacements = [
+    [
+      'components: Record<string, Function>;',
+      'components: PatchableComponents;',
+    ],
+    [
+      'export default PluginApi;',
+      `export default PluginApi;\ndeclare global {\n\tinterface Window {\n\t\tPluginApi: typeof PluginApi;\n\t}\n}`,
+    ],
+    ['} from "./patch"', ', PatchableComponents } from "./patch"'],
+  ];
+  return {
+    ...file,
+    text: replacements.reduce((text, [s, r]) => {
+      return text.replace(s, r);
+    }, file.text),
+  };
+}
 function exportInterface(file: MemoryEmitResultFile) {
   return {
     ...file,
@@ -75,9 +97,13 @@ export class StashTypesBuilder implements ITypeBuilder {
         declaration: true,
         emitDeclarationOnly: true,
         outDir: ctx.outDir,
+        preserveConstEnums: true,
+        exactOptionalPropertyTypes: true,
+        verbatimModuleSyntax: true,
+        strict: true,
 
         // Optional for isolation:
-        declarationMap: false,
+
         noEmitOnError: false,
         composite: false,
         skipLibCheck: true,
@@ -91,9 +117,11 @@ export class StashTypesBuilder implements ITypeBuilder {
     });
 
     for (const outputFile of emitResults.getFiles()) {
-      const adjusted = patch(
-        exportInterface(index(imports(path(outputFile)))),
-        ctx.writer.toString(),
+      const adjusted = pluginApi(
+        patch(
+          exportInterface(index(imports(path(outputFile)))),
+          ctx.writer.toString(),
+        ),
       );
       ctx.logger.debug(`Writing ${adjusted.filePath}`);
       ctx.fs.writeFileSync(adjusted.filePath, adjusted.text);

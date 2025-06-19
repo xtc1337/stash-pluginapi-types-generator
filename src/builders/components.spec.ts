@@ -69,5 +69,13 @@ describe('components', () => {
       const infos = builder.componentInfos;
       console.log(infos);
     });
+    it('should infer React.FC<intersection & {}> types', () => {
+      builder.process(
+        getStashSourceFile(project, 'src/components/Groups/GroupSelect.tsx'),
+        ctx,
+      );
+      const infos = builder.componentInfos;
+      console.log(infos);
+    });
   });
 });

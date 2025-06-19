@@ -19,6 +19,8 @@ export type ObjectType = {
   name: string;
   props: Record<string, SerializedType>;
   filePath: string;
+  typeArgs?: SerializedType[];
+  constraint?: SerializedType;
   importPath?: string;
 };
 
